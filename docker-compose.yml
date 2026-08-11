@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Перебивает значение из .env: внутри контейнера база всегда на томе.
+      DB_PATH: /data/vidsum.db
+    volumes:
+      # Транскрипты, саммари и файл cookies переживают перезапуск и пересборку.
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

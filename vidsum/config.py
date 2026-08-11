@@ -31,6 +31,10 @@ class Config:
     asr_backend: str = os.getenv("ASR_BACKEND", "off")
     whisper_model: str = os.getenv("WHISPER_MODEL", "small")
 
+    # Обход блокировок с серверных IP: cookies залогиненного аккаунта и прокси.
+    cookies_file: str = os.getenv("COOKIES_FILE", "")
+    ytdlp_proxy: str = os.getenv("YTDLP_PROXY", "")
+
     # Языки субтитров в порядке предпочтения.
     subtitle_langs: tuple[str, ...] = ("ru", "en")
 

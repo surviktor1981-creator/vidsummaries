@@ -76,8 +76,23 @@ def _ydl(extra: dict | None = None) -> yt_dlp.YoutubeDL:
         "writeautomaticsub": True,
         "extract_flat": False,
     }
+    opts.update(_access_opts())
     opts.update(extra or {})
     return yt_dlp.YoutubeDL(opts)
+
+
+def _access_opts() -> dict:
+    """Обход блокировок с серверных IP.
+
+    С датацентровых адресов YouTube регулярно требует подтвердить, что вы не
+    бот. Лечится cookies залогиненного аккаунта, в тяжёлых случаях — прокси.
+    """
+    opts: dict = {}
+    if config.cookies_file:
+        opts["cookiefile"] = config.cookies_file
+    if config.ytdlp_proxy:
+        opts["proxy"] = config.ytdlp_proxy
+    return opts
 
 
 def _pick_track(
@@ -200,8 +215,9 @@ def _explain_download_error(message: str) -> str:
         return "Не знаю, как читать этот сайт."
     if "sign in to confirm" in low or "bot" in low:
         return (
-            "YouTube просит подтвердить, что вы не бот. "
-            "Помогает запуск с cookies браузера — см. README."
+            "YouTube просит подтвердить, что запрос не от бота — так бывает с "
+            "серверных адресов.\nЛечится файлом cookies: положите его на сервер "
+            "и укажите COOKIES_FILE в .env (см. DEPLOY.md)."
         )
     return f"Не удалось получить видео: {message.splitlines()[0][:300]}"
 
@@ -230,6 +246,7 @@ def _transcribe(url: str, meta: VideoMeta) -> list[Segment]:
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}
             ],
+            **_access_opts(),
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
