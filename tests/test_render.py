@@ -108,6 +108,39 @@ def test_short_message_fits_telegram_limit():
     assert "ВЕРДИКТ" in text  # верхние блоки переживают подрезку
 
 
+def test_trimming_is_visible_and_spares_theses():
+    """Молчаливая подрезка врёт: обрыв карты глав читается как конец видео."""
+    summary = _summary(
+        theses=[Thesis(text=f"Тезис {i}: " + "смысл " * 15) for i in range(9)],
+        chapters=[Chapter(start=i * 60, title=f"Глава {i} " * 8, skippable=False) for i in range(60)],
+        facts=Facts(numbers=["+30% recall"], names=[], tools=[], links=[], terms=[]),
+    )
+    text = render.short_message(summary, _meta())
+
+    assert len(text) <= render.TG_LIMIT
+    assert "… ещё" in text  # остаток посчитан, а не выброшен молча
+    # Тезисы важнее навигации — режется карта, а не они.
+    assert text.count("Тезис ") == 9
+    assert "ФАКТУРА" in text  # сводные списки переживают подрезку глав
+    assert "ПО ТАЙМКОДАМ" in text  # секция не исчезает целиком
+
+
+def test_no_trim_marker_when_everything_fits():
+    text = render.short_message(_summary(), _meta())
+    assert "… ещё" not in text
+
+
+def test_section_order_is_stable():
+    text = render.short_message(
+        _summary(disagreements=["Ведущий не согласен."]), _meta()
+    )
+    positions = [
+        text.index(marker)
+        for marker in ("ВЕРДИКТ", "ТЕЗИСЫ", "ПО ТАЙМКОДАМ", "ФАКТУРА", "ПРАКТИКА", "РАЗНОГЛАСИЯ", "ОГОВОРКИ")
+    ]
+    assert positions == sorted(positions)
+
+
 def test_timecode_url_for_non_youtube():
     meta = _meta(extractor="rutube", url="https://rutube.ru/video/xyz/")
     assert meta.timecode_url(90) == "https://rutube.ru/video/xyz/?t=90"

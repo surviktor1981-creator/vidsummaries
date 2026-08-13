@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from html import escape
 
 from .models import Summary
@@ -27,112 +28,137 @@ def _e(text: str) -> str:
     return escape(str(text), quote=False)
 
 
-def _bullets(items: list[str], limit: int | None = None) -> list[str]:
-    shown = items[:limit] if limit else items
-    return [f"• {_e(item)}" for item in shown]
+def _bullets(items: list[str]) -> list[str]:
+    return [f"• {_e(item)}" for item in items]
+
+
+@dataclass
+class _Block:
+    """Секция сообщения. order — очередь на подрезку, 0 = не резать никогда."""
+
+    header: str
+    items: list[str] = field(default_factory=list)
+    order: int = 0
+
+
+def _fit(blocks: list[_Block]) -> str:
+    """Ужимает сообщение под лимит Telegram, начиная с наименее важных секций.
+
+    Резать молча нельзя: если карта глав обрывается на середине видео,
+    читатель решит, что там оно и заканчивается. Поэтому у подрезанной секции
+    остаётся счётчик остатка со ссылкой на полную версию.
+    """
+    kept = [len(block.items) for block in blocks]
+
+    def assemble() -> str:
+        parts: list[str] = []
+        for block, shown in zip(blocks, kept):
+            if not block.items:
+                parts.append(block.header)
+                continue
+            body = block.header + "\n" + "\n".join(block.items[:shown])
+            lost = len(block.items) - shown
+            if lost:
+                body += f"\n<i>… ещё {lost} — в полной версии</i>"
+            parts.append(body)
+        return "\n\n".join(parts)
+
+    text = assemble()
+    for _ in range(500):
+        if len(text) <= SHORT_TARGET:
+            return text
+        # Хотя бы один пункт в секции оставляем: иначе исчезнет и счётчик остатка.
+        candidates = [i for i, block in enumerate(blocks) if block.order > 0 and kept[i] > 1]
+        if not candidates:
+            break
+        last_in_queue = max(blocks[i].order for i in candidates)
+        victim = max(
+            (i for i in candidates if blocks[i].order == last_in_queue), key=lambda i: kept[i]
+        )
+        kept[victim] -= 1
+        text = assemble()
+
+    if len(text) > TG_LIMIT:
+        text = text[: TG_LIMIT - 60].rsplit("\n", 1)[0]
+        text += "\n\n<i>Подрезано под лимит Telegram — полная версия в файле.</i>"
+    return text
 
 
 # --- Короткое сообщение ----------------------------------------------------
 
 
 def short_message(summary: Summary, meta: VideoMeta) -> str:
-    """Основное сообщение. Собирается по приоритету и ужимается под лимит."""
+    """Основное сообщение: блоки собираются по приоритету и ужимаются под лимит."""
     header = (
         f"🎬 <b>{_e(meta.title)}</b>\n"
         f"<i>{_e(meta.channel)} · {fmt_ts(meta.duration)} · "
         f"{TYPE_LABEL.get(summary.video_type, 'видео')}</i>"
     )
 
-    # (блок, можно ли ужимать) — блоки собираются сверху вниз, пока есть место.
-    blocks: list[tuple[str, bool]] = [(header, False)]
-
-    blocks.append((f"📌 <b>ВЕРДИКТ</b>\n{_e(summary.verdict)}\n\n▸ {_e(summary.watch_advice)}", False))
+    # (заголовок, пункты, очередь на подрезку). Очередь: 0 — не резать никогда,
+    # дальше чем больше число, тем раньше блок начинают резать. Первой уходит
+    # карта глав — она целиком есть в файле; тезисы режутся последними.
+    blocks: list[_Block] = [
+        _Block(header, [], 0),
+        _Block(
+            "📌 <b>ВЕРДИКТ</b>",
+            [_e(summary.verdict), "", f"▸ {_e(summary.watch_advice)}"],
+            0,
+        ),
+    ]
 
     if summary.theses:
-        lines = []
+        items = []
         previous_speaker: str | None = None
         for i, thesis in enumerate(summary.theses, start=1):
             # Имя показываем только когда голос сменился: в интервью с одним
             # основным спикером подпись у каждого пункта — шум.
             if thesis.speaker and thesis.speaker != previous_speaker:
-                line = f"{i}. <b>{_e(thesis.speaker)}:</b> {_e(thesis.text)}"
+                item = f"{i}. <b>{_e(thesis.speaker)}:</b> {_e(thesis.text)}"
             else:
-                line = f"{i}. {_e(thesis.text)}"
+                item = f"{i}. {_e(thesis.text)}"
             previous_speaker = thesis.speaker or previous_speaker
             if thesis.basis:
-                line += f"\n    <i>— {_e(thesis.basis)}</i>"
-            lines.append(line)
-        blocks.append(("🔑 <b>ТЕЗИСЫ</b>\n" + "\n".join(lines), True))
+                item += f"\n    <i>— {_e(thesis.basis)}</i>"
+            items.append(item)
+        blocks.append(_Block("🔑 <b>ТЕЗИСЫ</b>", items, 1))
 
     if summary.chapters:
-        lines = []
+        items = []
         for chapter in summary.chapters:
             url = meta.timecode_url(chapter.start)
             mark = " <i>(можно пропустить)</i>" if chapter.skippable else ""
-            lines.append(f'<a href="{url}">{fmt_ts(chapter.start)}</a> {_e(chapter.title)}{mark}')
-        blocks.append(("🕐 <b>ПО ТАЙМКОДАМ</b>\n" + "\n".join(lines), True))
+            items.append(f'<a href="{url}">{fmt_ts(chapter.start)}</a> {_e(chapter.title)}{mark}')
+        blocks.append(_Block("🕐 <b>ПО ТАЙМКОДАМ</b>", items, 5))
 
     facts = summary.facts
-    fact_lines = []
-    for label, values in (
-        ("Цифры", facts.numbers),
-        ("Имена", facts.names),
-        ("Инструменты", facts.tools),
-        ("Термины", facts.terms),
-        ("Ссылки", facts.links),
-    ):
-        if values:
-            fact_lines.append(f"<b>{label}:</b> {_e('; '.join(values))}")
-    if fact_lines:
-        blocks.append(("🔢 <b>ФАКТУРА</b>\n" + "\n".join(fact_lines), True))
+    fact_items = [
+        f"<b>{label}:</b> {_e('; '.join(values))}"
+        for label, values in (
+            ("Цифры", facts.numbers),
+            ("Имена", facts.names),
+            ("Инструменты", facts.tools),
+            ("Термины", facts.terms),
+            ("Ссылки", facts.links),
+        )
+        if values
+    ]
+    if fact_items:
+        blocks.append(_Block("🔢 <b>ФАКТУРА</b>", fact_items, 3))
 
     if summary.practical:
-        blocks.append(("🛠 <b>ПРАКТИКА</b>\n" + "\n".join(_bullets(summary.practical)), True))
+        blocks.append(_Block("🛠 <b>ПРАКТИКА</b>", _bullets(summary.practical), 4))
 
     if summary.disagreements:
-        blocks.append(
-            ("⚖️ <b>РАЗНОГЛАСИЯ</b>\n" + "\n".join(_bullets(summary.disagreements)), True)
-        )
+        blocks.append(_Block("⚖️ <b>РАЗНОГЛАСИЯ</b>", _bullets(summary.disagreements), 2))
 
     warn = list(summary.caveats) + [f"реклама: {s}" for s in summary.sponsored]
     if summary.unclear:
         warn.append(f"неразборчиво: {'; '.join(summary.unclear)}")
     if warn:
-        blocks.append(("⚠️ <b>ОГОВОРКИ</b>\n" + "\n".join(_bullets(warn)), True))
+        blocks.append(_Block("⚠️ <b>ОГОВОРКИ</b>", _bullets(warn), 2))
 
     return _fit(blocks)
-
-
-def _fit(blocks: list[tuple[str, bool]]) -> str:
-    """Собирает блоки под лимит: сжимаемые обрезаются по строкам, затем выкидываются."""
-    text = "\n\n".join(block for block, _ in blocks)
-    if len(text) <= SHORT_TARGET:
-        return text
-
-    # Сначала подрезаем самые длинные сжимаемые блоки по строкам.
-    working = list(blocks)
-    for _ in range(200):
-        text = "\n\n".join(block for block, _ in working)
-        if len(text) <= SHORT_TARGET:
-            return text
-        longest = max(
-            (i for i, (_, squeezable) in enumerate(working) if squeezable),
-            key=lambda i: len(working[i][0]),
-            default=None,
-        )
-        if longest is None:
-            break
-        body, squeezable = working[longest]
-        lines = body.split("\n")
-        if len(lines) <= 2:
-            working.pop(longest)
-            continue
-        working[longest] = ("\n".join(lines[:-1]), squeezable)
-
-    text = "\n\n".join(block for block, _ in working)
-    if len(text) > TG_LIMIT:
-        text = text[: TG_LIMIT - 40].rsplit("\n", 1)[0] + "\n…"
-    return text + "\n\n<i>Подрезано под лимит Telegram — полная версия в файле.</i>"
 
 
 # --- Полная версия (Markdown-файл) -----------------------------------------
