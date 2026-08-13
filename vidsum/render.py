@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 
 from .models import Summary
@@ -129,14 +130,6 @@ def _fit(blocks: list[tuple[str, bool]]) -> str:
     return text + "\n\n<i>Подрезано под лимит Telegram — полная версия в файле.</i>"
 
 
-def theses_only(summary: Summary) -> str:
-    lines = [f"📌 {_e(summary.verdict)}", ""]
-    for i, thesis in enumerate(summary.theses, start=1):
-        prefix = f"{_e(thesis.speaker)}: " if thesis.speaker else ""
-        lines.append(f"{i}. {prefix}{_e(thesis.text)}")
-    return "\n".join(lines)[:TG_LIMIT]
-
-
 # --- Полная версия (Markdown-файл) -----------------------------------------
 
 
@@ -209,6 +202,25 @@ def full_markdown(summary: Summary, meta: VideoMeta) -> str:
             out += [f"## {title}", ""] + [f"- {item}" for item in items] + [""]
 
     return "\n".join(out)
+
+
+def full_markdown_bytes(summary: Summary, meta: VideoMeta) -> bytes:
+    """Готовит файл к отправке в Telegram.
+
+    BOM обязателен: без него Telegram и Windows читают кириллицу в .md как
+    cp1251 и показывают кракозябры вместо текста.
+    """
+    return b"\xef\xbb\xbf" + full_markdown(summary, meta).encode("utf-8")
+
+
+_UNSAFE_IN_NAME = re.compile(r"[^\w\s-]", re.UNICODE)
+
+
+def document_name(meta: VideoMeta) -> str:
+    """Имя файла из названия видео — чтобы сохранённые саммари различались."""
+    base = _UNSAFE_IN_NAME.sub("", meta.title).strip()
+    base = re.sub(r"\s+", "-", base)[:60].strip("-")
+    return f"{base or meta.video_id or 'summary'}.md"
 
 
 def split_for_telegram(text: str, limit: int = TG_LIMIT) -> list[str]:

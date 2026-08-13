@@ -39,8 +39,8 @@ HELP = (
     "В саммари: вердикт, ключевые тезисы, карта по таймкодам, фактура "
     "(цифры, имена, инструменты), практические шаги и оговорки.\n\n"
     "Кнопки под ответом:\n"
-    "• <b>Подробно</b> — полная версия файлом\n"
-    "• <b>Тезисы</b> — только выжимка\n"
+    "• <b>Подробно</b> — полная версия файлом: все тезисы, вся карта глав, "
+    "вся фактура и цитаты\n"
     "• <b>Спросить</b> — вопрос по содержанию видео\n\n"
     "Команды: /help — эта справка."
 )
@@ -68,9 +68,8 @@ def _keyboard(video_id: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📄 Подробно", callback_data=f"full:{video_id}"),
-                InlineKeyboardButton(text="⚡ Тезисы", callback_data=f"short:{video_id}"),
-            ],
-            [InlineKeyboardButton(text="❓ Спросить по видео", callback_data=f"ask:{video_id}")],
+                InlineKeyboardButton(text="❓ Спросить", callback_data=f"ask:{video_id}"),
+            ]
         ]
     )
 
@@ -183,21 +182,13 @@ async def on_full(callback: CallbackQuery) -> None:
     if not stored:
         return
     await callback.answer()
-    document = render.full_markdown(stored.summary, stored.meta).encode("utf-8")
-    name = f"{stored.meta.video_id or 'summary'}.md"
     await callback.message.answer_document(
-        BufferedInputFile(document, filename=name),
+        BufferedInputFile(
+            render.full_markdown_bytes(stored.summary, stored.meta),
+            filename=render.document_name(stored.meta),
+        ),
         caption=f"Полная версия: {escape(stored.meta.title, quote=False)}"[:1024],
     )
-
-
-@dp.callback_query(F.data.startswith("short:"))
-async def on_theses(callback: CallbackQuery) -> None:
-    stored = await _stored_for(callback)
-    if not stored:
-        return
-    await callback.answer()
-    await _send_html(callback.message, render.theses_only(stored.summary))
 
 
 @dp.callback_query(F.data.startswith("ask:"))

@@ -116,11 +116,20 @@ def test_full_markdown_keeps_everything():
     assert "_(можно пропустить)_" in text
 
 
-def test_theses_only_is_compact():
-    text = render.theses_only(_summary())
-    assert "Чанкинг важнее модели." in text
-    assert "ФАКТУРА" not in text
-    assert len(text) <= render.TG_LIMIT
+def test_markdown_bytes_start_with_bom():
+    """Без BOM Telegram и Windows читают кириллицу как cp1251 — кракозябры."""
+    data = render.full_markdown_bytes(_summary(), _meta())
+    assert data.startswith(b"\xef\xbb\xbf")
+    assert data[3:].decode("utf-8").startswith("# Векторный поиск")
+    assert "Чанкинг важнее модели." in data.decode("utf-8-sig")
+
+
+def test_document_name_from_title():
+    assert render.document_name(_meta()) == "Векторный-поиск.md"
+    # Символы, недопустимые в именах файлов, вычищаются.
+    assert "/" not in render.document_name(_meta(title="RAG: часть 1/2 — «итоги»"))
+    # Пустое после чистки название не должно давать файл без имени.
+    assert render.document_name(_meta(title="!!!", video_id="abc123")) == "abc123.md"
 
 
 def test_split_for_telegram():
