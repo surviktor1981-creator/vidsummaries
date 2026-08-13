@@ -50,10 +50,15 @@ def short_message(summary: Summary, meta: VideoMeta) -> str:
 
     if summary.theses:
         lines = []
+        previous_speaker: str | None = None
         for i, thesis in enumerate(summary.theses, start=1):
-            line = f"{i}. {_e(thesis.text)}"
-            if thesis.speaker:
+            # Имя показываем только когда голос сменился: в интервью с одним
+            # основным спикером подпись у каждого пункта — шум.
+            if thesis.speaker and thesis.speaker != previous_speaker:
                 line = f"{i}. <b>{_e(thesis.speaker)}:</b> {_e(thesis.text)}"
+            else:
+                line = f"{i}. {_e(thesis.text)}"
+            previous_speaker = thesis.speaker or previous_speaker
             if thesis.basis:
                 line += f"\n    <i>— {_e(thesis.basis)}</i>"
             lines.append(line)

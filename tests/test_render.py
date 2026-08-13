@@ -61,6 +61,28 @@ def test_short_message_has_every_section():
     assert "реклама: 01:58" in text  # интеграции не растворяются
 
 
+def test_speaker_shown_only_when_voice_changes():
+    """В интервью с одним спикером подпись у каждого пункта — шум."""
+    summary = _summary(
+        theses=[
+            Thesis(text="Первое утверждение.", speaker="Шульман"),
+            Thesis(text="Второе утверждение.", speaker="Шульман"),
+            Thesis(text="Возражение ведущего.", speaker="Ведущий Дождя"),
+            Thesis(text="Ответ на возражение.", speaker="Шульман"),
+        ],
+    )
+    text = render.short_message(summary, _meta())
+    assert text.count("Шульман:") == 2  # первое вхождение и возврат после смены голоса
+    assert "Ведущий Дождя:" in text
+    assert "2. Второе утверждение." in text  # повтор имени не печатается
+
+
+def test_speaker_absent_for_single_voice_video():
+    summary = _summary(theses=[Thesis(text="Утверждение без спикера.", speaker=None)])
+    text = render.short_message(summary, _meta())
+    assert "1. Утверждение без спикера." in text
+
+
 def test_short_message_escapes_html():
     summary = _summary(verdict='Автор про <script> и "кавычки" & амперсанд')
     text = render.short_message(summary, _meta(title="A <b>bold</b> title"))
