@@ -7,6 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest  # noqa: E402
+
 from vidsum import source  # noqa: E402
 
 
@@ -97,3 +99,58 @@ def test_access_opts_reach_ydl(monkeypatch, tmp_path):
 
     # yt-dlp переписывает cookies при закрытии — файл обязан быть записываемым.
     assert cookies.exists()
+
+
+# --- Расшифровки нет: диагностика и потолок распознавания ------------------
+
+
+def test_no_transcript_message_when_no_tracks_and_asr_off(monkeypatch):
+    monkeypatch.setattr(source.config, "asr_backend", "off")
+    message = source._no_transcript_message({}, {})
+    assert "нет ни субтитров автора, ни автоматических" in message
+    assert "ASR_BACKEND=faster-whisper" in message  # сказано, что включить
+
+
+def test_no_transcript_message_distinguishes_parse_failure(monkeypatch):
+    """Дорожки есть, а расшифровки нет — это наш баг, и текст должен это признавать."""
+    monkeypatch.setattr(source.config, "asr_backend", "off")
+    message = source._no_transcript_message({"ru": [{"ext": "vtt"}]}, {"a.en": []})
+    assert "баг разбора" in message
+    assert "ru" in message and "a.en" in message
+
+
+def test_no_transcript_message_when_asr_on_but_failed(monkeypatch):
+    monkeypatch.setattr(source.config, "asr_backend", "faster-whisper")
+    message = source._no_transcript_message({}, {})
+    assert "docker compose logs" in message
+
+
+def test_asr_eta_grows_with_duration_and_shrinks_with_model_size():
+    hour = 3600
+    assert source.asr_eta_minutes(hour, "small", 1) > source.asr_eta_minutes(hour, "base", 1)
+    assert source.asr_eta_minutes(hour, "base", 1) > source.asr_eta_minutes(hour, "tiny", 1)
+    assert source.asr_eta_minutes(2 * hour, "base", 2) > source.asr_eta_minutes(hour, "base", 2)
+    assert source.asr_eta_minutes(hour, "base", 4) < source.asr_eta_minutes(hour, "base", 1)
+    assert source.asr_eta_minutes(30, "base", 1) >= 1  # никогда не «0 минут»
+
+
+def test_transcribe_refuses_video_over_ceiling(monkeypatch):
+    """Трёхчасовое видео заняло бы бота на часы — лучше честный отказ."""
+    monkeypatch.setattr(source.config, "asr_backend", "faster-whisper")
+    monkeypatch.setattr(source.config, "asr_max_duration", 5400)
+    meta = source.VideoMeta(
+        video_id="x", url="u", title="t", channel="c",
+        duration=11000, upload_date="", extractor="youtube",
+    )
+    with pytest.raises(source.FetchError, match="потолка распознавания"):
+        source._transcribe("u", meta)
+
+
+def test_transcribe_rejects_unknown_backend(monkeypatch):
+    monkeypatch.setattr(source.config, "asr_backend", "whisper-cpp")
+    meta = source.VideoMeta(
+        video_id="x", url="u", title="t", channel="c",
+        duration=60, upload_date="", extractor="youtube",
+    )
+    with pytest.raises(source.FetchError, match="Неизвестный ASR_BACKEND"):
+        source._transcribe("u", meta)

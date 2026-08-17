@@ -29,7 +29,11 @@ class Config:
     db_path: str = os.getenv("DB_PATH", "vidsum.db")
 
     asr_backend: str = os.getenv("ASR_BACKEND", "off")
-    whisper_model: str = os.getenv("WHISPER_MODEL", "small")
+    whisper_model: str = os.getenv("WHISPER_MODEL", "base")
+    whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+    # Распознавание на слабом сервере идёт медленнее реального времени, поэтому
+    # у него есть потолок: лучше честно отказать, чем занять бота на два часа.
+    asr_max_duration: int = int(os.getenv("ASR_MAX_DURATION", "5400"))
 
     # Обход блокировок с серверных IP: cookies залогиненного аккаунта и прокси.
     cookies_file: str = os.getenv("COOKIES_FILE", "")

@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 import logging
+import math
+import os
 import re
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yt_dlp
 
 from .config import config
-from .transcript import Segment, parse_subtitles
+from .transcript import Segment, fmt_ts, parse_subtitles
 
 log = logging.getLogger(__name__)
 
@@ -149,13 +153,20 @@ def _meta_from_info(info: dict) -> VideoMeta:
     )
 
 
-def fetch(url: str) -> FetchedVideo:
-    """Скачивает метаданные и расшифровку. Бросает FetchError с текстом для пользователя."""
+def fetch(url: str, on_asr_start: Callable[[int], None] | None = None) -> FetchedVideo:
+    """Скачивает метаданные и расшифровку. Бросает FetchError с текстом для пользователя.
+
+    on_asr_start вызывается с оценкой в минутах, если дело дошло до
+    распознавания речи: оно идёт минутами, и пользователь должен об этом знать,
+    а не смотреть в замерший экран.
+    """
     with _ydl() as ydl:
-        return _fetch_with(ydl, url)
+        return _fetch_with(ydl, url, on_asr_start)
 
 
-def _fetch_with(ydl: yt_dlp.YoutubeDL, url: str) -> FetchedVideo:
+def _fetch_with(
+    ydl: yt_dlp.YoutubeDL, url: str, on_asr_start: Callable[[int], None] | None = None
+) -> FetchedVideo:
     try:
         info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
@@ -190,15 +201,57 @@ def _fetch_with(ydl: yt_dlp.YoutubeDL, url: str) -> FetchedVideo:
         if segments:
             return FetchedVideo(meta, segments, f"{label} ({lang})")
 
-    segments = _transcribe(url, meta)
-    if segments:
-        return FetchedVideo(meta, segments, f"ASR ({config.whisper_model})")
+    if config.asr_backend != "off":
+        segments = _transcribe(url, meta, on_asr_start)
+        if segments:
+            return FetchedVideo(meta, segments, f"распознавание речи ({config.whisper_model})")
 
-    raise FetchError(
-        "У видео нет субтитров, а локальное распознавание выключено.\n"
-        "Включите его: ASR_BACKEND=faster-whisper в .env "
-        "(нужны ffmpeg и пакет faster-whisper)."
+    raise FetchError(_no_transcript_message(manual, auto))
+
+
+def _no_transcript_message(manual: dict, auto: dict) -> str:
+    """Объясняет, почему расшифровки нет, и что с этим делать."""
+    if manual or auto:
+        # Дорожки есть, но ни одна не разобралась — это наша проблема, не видео.
+        found = ", ".join(sorted(set(manual) | set(auto))[:8])
+        return (
+            "У видео есть дорожки субтитров, но ни одну не удалось прочитать.\n"
+            f"Найдены языки: {found}.\nПришлите ссылку ещё раз — если повторится, "
+            "это баг разбора, а не проблема видео."
+        )
+    if config.asr_backend == "off":
+        return (
+            "У видео нет ни субтитров автора, ни автоматических — YouTube их не "
+            "сделал.\n\nЧтобы такие видео тоже разбирались, включите распознавание "
+            "речи: <code>ASR_BACKEND=faster-whisper</code> в .env на сервере, "
+            "затем <code>docker compose up -d</code>."
+        )
+    return (
+        "У видео нет субтитров, и распознать речь не удалось. Подробности в логах "
+        "сервера: <code>docker compose logs --tail 50</code>."
     )
+
+
+# Скорость распознавания на одном ядре относительно реального времени: во
+# сколько раз быстрее звука работает модель. Числа грубые, нужны только чтобы
+# назвать пользователю порядок ожидания.
+_ASR_SPEED_PER_CORE = {
+    "tiny": 5.0,
+    "base": 2.5,
+    "small": 1.0,
+    "medium": 0.35,
+    "large-v3": 0.15,
+}
+
+
+def asr_eta_minutes(duration: int, model: str | None = None, cores: int | None = None) -> int:
+    """Оценка времени распознавания в минутах, с запасом в сторону пессимизма."""
+    model = model or config.whisper_model
+    cores = cores or (os.cpu_count() or 1)
+    per_core = _ASR_SPEED_PER_CORE.get(model, 1.0)
+    # Ядра помогают не линейно, а после четвёртого почти не помогают.
+    speed = per_core * min(cores, 4) * 0.8
+    return max(1, math.ceil(duration / speed / 60))
 
 
 def _explain_download_error(message: str) -> str:
@@ -222,20 +275,56 @@ def _explain_download_error(message: str) -> str:
     return f"Не удалось получить видео: {message.splitlines()[0][:300]}"
 
 
-def _transcribe(url: str, meta: VideoMeta) -> list[Segment]:
-    """Локальное распознавание речи, если субтитров нет и бэкенд включён."""
-    if config.asr_backend != "faster-whisper":
-        return []
+_model_cache: dict[str, object] = {}
+
+
+def _whisper_model():
+    """Модель грузится секунды и весит сотни мегабайт — держим одну на процесс."""
+    if config.whisper_model in _model_cache:
+        return _model_cache[config.whisper_model]
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise FetchError(
-            "ASR_BACKEND=faster-whisper, но пакет faster-whisper не установлен: "
-            "pip install faster-whisper"
+            "ASR_BACKEND=faster-whisper, но пакет не установлен. "
+            "Обновите образ: docker compose up -d --build"
         ) from exc
+
+    log.info("Загружаю модель распознавания %s", config.whisper_model)
+    model = WhisperModel(
+        config.whisper_model,
+        device="cpu",
+        compute_type=config.whisper_compute_type,
+        cpu_threads=os.cpu_count() or 1,
+    )
+    _model_cache[config.whisper_model] = model
+    return model
+
+
+def _transcribe(
+    url: str, meta: VideoMeta, on_asr_start: Callable[[int], None] | None = None
+) -> list[Segment]:
+    """Распознаёт речь, когда субтитров нет."""
+    if config.asr_backend != "faster-whisper":
+        raise FetchError(f"Неизвестный ASR_BACKEND: {config.asr_backend}")
+
+    if meta.duration and meta.duration > config.asr_max_duration:
+        raise FetchError(
+            f"У видео нет субтитров, а его длина ({fmt_ts(meta.duration)}) выше "
+            f"потолка распознавания ({fmt_ts(config.asr_max_duration)}).\n"
+            "Распознавание идёт медленнее реального времени, и такое видео заняло бы "
+            "бота на часы. Поднять потолок: ASR_MAX_DURATION в .env."
+        )
+
+    eta = asr_eta_minutes(meta.duration)
+    if on_asr_start:
+        on_asr_start(eta)
+    log.info("Субтитров нет, распознаю речь: %s (%s, оценка %s мин)", meta.title, fmt_ts(meta.duration), eta)
 
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "audio.%(ext)s"
+        # Без перекодирования в mp3: модель читает исходный поток сама, а
+        # лишний проход ffmpeg на слабом сервере стоит дороже, чем экономит.
         opts = {
             "skip_download": False,
             "format": "bestaudio/best",
@@ -243,18 +332,30 @@ def _transcribe(url: str, meta: VideoMeta) -> list[Segment]:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "64"}
-            ],
             **_access_opts(),
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-        files = list(Path(tmp).glob("audio.*"))
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except yt_dlp.utils.DownloadError as exc:
+            raise FetchError(_explain_download_error(str(exc))) from exc
+
+        files = [p for p in Path(tmp).iterdir() if p.is_file() and p.stat().st_size > 0]
         if not files:
             raise FetchError("Не удалось скачать аудиодорожку для распознавания.")
 
-        log.info("Распознаю аудио: %s (%s c)", meta.title, meta.duration)
-        model = WhisperModel(config.whisper_model, compute_type="int8")
-        chunks, _ = model.transcribe(str(files[0]), vad_filter=True)
-        return [Segment(start=c.start, text=c.text.strip()) for c in chunks if c.text.strip()]
+        started = time.monotonic()
+        chunks, info = _whisper_model().transcribe(str(files[0]), vad_filter=True)
+        segments = [Segment(start=c.start, text=c.text.strip()) for c in chunks if c.text.strip()]
+        log.info(
+            "Распознано: %s сегментов, язык %s, заняло %.0f c (оценка была %s мин)",
+            len(segments),
+            getattr(info, "language", "?"),
+            time.monotonic() - started,
+            eta,
+        )
+        if not segments:
+            raise FetchError(
+                "Распознавание не нашло речи — возможно, в видео только музыка или шум."
+            )
+        return segments

@@ -114,11 +114,24 @@ async def _process_video(message: Message, url: str) -> None:
         return
 
     status = await message.answer("⏳ Читаю видео…")
+    loop = asyncio.get_running_loop()
+
+    def on_asr_start(eta_minutes: int) -> None:
+        """Вызывается из рабочего потока, когда дело дошло до распознавания речи."""
+        asyncio.run_coroutine_threadsafe(
+            status.edit_text(
+                "🎧 Субтитров у видео нет — распознаю речь.\n"
+                f"<i>Это займёт примерно {eta_minutes} мин. Можно закрыть чат, "
+                "саммари придёт само.</i>"
+            ),
+            loop,
+        )
+
     try:
         async with _workers:
             await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
             try:
-                video = await asyncio.to_thread(fetch, url)
+                video = await asyncio.to_thread(fetch, url, on_asr_start)
             except FetchError as exc:
                 await status.edit_text(f"⚠️ {exc}")
                 return
