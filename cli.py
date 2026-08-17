@@ -95,10 +95,12 @@ def main() -> int:
 
     summary = summarize.summarize(video)
 
-    print(_strip_tags(render.short_message(summary, video.meta)))
+    print(_strip_tags(render.short_message(summary, video.meta, video.transcript_source)))
 
     out = args.out or Path(f"{video.meta.video_id or 'summary'}.md")
-    out.write_text(render.full_markdown(summary, video.meta), encoding="utf-8")
+    out.write_text(
+        render.full_markdown(summary, video.meta, video.transcript_source), encoding="utf-8"
+    )
     print(f"\nПолная версия: {out}", file=sys.stderr)
     return 0
 

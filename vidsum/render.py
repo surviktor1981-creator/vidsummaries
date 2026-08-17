@@ -11,7 +11,7 @@ from .source import VideoMeta
 from .transcript import fmt_ts
 
 TG_LIMIT = 4096
-SHORT_TARGET = 3300  # запас до лимита Telegram
+SHORT_TARGET = 3900  # Telegram считает лимит без HTML-тегов, так что запас есть
 
 TYPE_LABEL = {
     "lecture": "лекция",
@@ -30,6 +30,19 @@ def _e(text: str) -> str:
 
 def _bullets(items: list[str]) -> list[str]:
     return [f"• {_e(item)}" for item in items]
+
+
+# Категория фактуры — одна строка, и подрезать её изнутри нельзя. Без потолка
+# один разговорчивый ролик набивает туда двадцать чисел и съедает сообщение.
+_FACTS_PER_CATEGORY = 8
+
+
+def _fact_line(label: str, values: list[str]) -> str:
+    shown = values[:_FACTS_PER_CATEGORY]
+    line = f"<b>{label}:</b> {_e('; '.join(shown))}"
+    if len(values) > len(shown):
+        line += f" <i>(+{len(values) - len(shown)} в полной версии)</i>"
+    return line
 
 
 @dataclass
@@ -87,13 +100,16 @@ def _fit(blocks: list[_Block]) -> str:
 # --- Короткое сообщение ----------------------------------------------------
 
 
-def short_message(summary: Summary, meta: VideoMeta) -> str:
-    """Основное сообщение: блоки собираются по приоритету и ужимаются под лимит."""
-    header = (
-        f"🎬 <b>{_e(meta.title)}</b>\n"
-        f"<i>{_e(meta.channel)} · {fmt_ts(meta.duration)} · "
-        f"{TYPE_LABEL.get(summary.video_type, 'видео')}</i>"
-    )
+def short_message(summary: Summary, meta: VideoMeta, source: str = "") -> str:
+    """Основное сообщение: блоки собираются по приоритету и ужимаются под лимит.
+
+    source — откуда взялась расшифровка. Пометка нужна только для распознанной
+    речи: там имена и термины слышны с ошибками, и доверия к ним меньше.
+    """
+    marks = [_e(meta.channel), fmt_ts(meta.duration), TYPE_LABEL.get(summary.video_type, "видео")]
+    if source.startswith("распознавание"):
+        marks.append("распознано с речи")
+    header = f"🎬 <b>{_e(meta.title)}</b>\n<i>{' · '.join(marks)}</i>"
 
     # (заголовок, пункты, очередь на подрезку). Очередь: 0 — не резать никогда,
     # дальше чем больше число, тем раньше блок начинают резать. Первой уходит
@@ -133,7 +149,7 @@ def short_message(summary: Summary, meta: VideoMeta) -> str:
 
     facts = summary.facts
     fact_items = [
-        f"<b>{label}:</b> {_e('; '.join(values))}"
+        _fact_line(label, values)
         for label, values in (
             ("Цифры", facts.numbers),
             ("Имена", facts.names),
@@ -164,7 +180,7 @@ def short_message(summary: Summary, meta: VideoMeta) -> str:
 # --- Полная версия (Markdown-файл) -----------------------------------------
 
 
-def full_markdown(summary: Summary, meta: VideoMeta) -> str:
+def full_markdown(summary: Summary, meta: VideoMeta, source: str = "") -> str:
     out: list[str] = [
         f"# {meta.title}",
         "",
@@ -172,6 +188,7 @@ def full_markdown(summary: Summary, meta: VideoMeta) -> str:
         f"**Длительность:** {fmt_ts(meta.duration)}  ",
         f"**Опубликовано:** {meta.upload_date or 'неизвестно'}  ",
         f"**Тип:** {TYPE_LABEL.get(summary.video_type, 'видео')}  ",
+        *([f"**Расшифровка:** {source}  "] if source else []),
         f"**Ссылка:** {meta.url}",
         "",
         "## Вердикт",
@@ -235,13 +252,13 @@ def full_markdown(summary: Summary, meta: VideoMeta) -> str:
     return "\n".join(out)
 
 
-def full_markdown_bytes(summary: Summary, meta: VideoMeta) -> bytes:
+def full_markdown_bytes(summary: Summary, meta: VideoMeta, source: str = "") -> bytes:
     """Готовит файл к отправке в Telegram.
 
     BOM обязателен: без него Telegram и Windows читают кириллицу в .md как
     cp1251 и показывают кракозябры вместо текста.
     """
-    return b"\xef\xbb\xbf" + full_markdown(summary, meta).encode("utf-8")
+    return b"\xef\xbb\xbf" + full_markdown(summary, meta, source).encode("utf-8")
 
 
 _UNSAFE_IN_NAME = re.compile(r"[^\w\s-]", re.UNICODE)

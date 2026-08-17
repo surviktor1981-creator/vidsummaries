@@ -141,6 +141,55 @@ def test_section_order_is_stable():
     assert positions == sorted(positions)
 
 
+def test_facts_category_is_capped():
+    """Одна категория — одна строка, подрезать её изнутри нельзя: нужен потолок."""
+    summary = _summary(
+        facts=Facts(
+            numbers=[f"число {i}" for i in range(25)],
+            names=["Сергей"], tools=[], links=[], terms=[],
+        )
+    )
+    text = render.short_message(summary, _meta())
+    assert text.count("число ") == render._FACTS_PER_CATEGORY
+    assert f"(+{25 - render._FACTS_PER_CATEGORY} в полной версии)" in text
+    assert "Имена:" in text  # соседние категории не пострадали
+
+
+def test_bloated_facts_do_not_starve_other_sections():
+    """Раньше раздутая фактура съедала сообщение и остальное резалось до одного пункта."""
+    summary = _summary(
+        theses=[Thesis(text=f"Тезис {i}: " + "смысл " * 10) for i in range(9)],
+        facts=Facts(
+            numbers=[f"показатель {i} с пояснением" for i in range(30)],
+            names=[f"имя {i}" for i in range(30)],
+            tools=[f"инструмент {i}" for i in range(30)],
+            links=[], terms=[],
+        ),
+        practical=[f"Шаг {i}: рекомендация" for i in range(12)],
+        caveats=[f"Оговорка {i}: условие" for i in range(13)],
+    )
+    text = render.short_message(summary, _meta())
+    assert len(text) <= render.TG_LIMIT
+    assert text.count("Тезис ") == 9  # тезисы целы
+    assert text.count("Шаг ") >= 6  # практика не ужата до одного пункта
+    assert text.count("Оговорка ") >= 6
+
+
+def test_asr_source_is_marked_in_header():
+    """На распознанной речи имена и термины грязнее — читатель должен знать."""
+    from_speech = render.short_message(_summary(), _meta(), "распознавание речи (base)")
+    from_subs = render.short_message(_summary(), _meta(), "субтитры автора (ru)")
+    assert "распознано с речи" in from_speech
+    assert "распознано с речи" not in from_subs
+    assert "распознано с речи" not in render.short_message(_summary(), _meta())
+
+
+def test_full_markdown_records_transcript_source():
+    text = render.full_markdown(_summary(), _meta(), "распознавание речи (base)")
+    assert "**Расшифровка:** распознавание речи (base)" in text
+    assert "**Расшифровка:**" not in render.full_markdown(_summary(), _meta())
+
+
 def test_timecode_url_for_non_youtube():
     meta = _meta(extractor="rutube", url="https://rutube.ru/video/xyz/")
     assert meta.timecode_url(90) == "https://rutube.ru/video/xyz/?t=90"

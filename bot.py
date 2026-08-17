@@ -108,7 +108,7 @@ async def _process_video(message: Message, url: str) -> None:
         store.set_current(message.chat.id, cached.id)
         await _send_html(
             message,
-            render.short_message(cached.summary, cached.meta),
+            render.short_message(cached.summary, cached.meta, cached.source),
             reply_markup=_keyboard(cached.id),
         )
         return
@@ -155,7 +155,9 @@ async def _process_video(message: Message, url: str) -> None:
 
     await status.delete()
     await _send_html(
-        message, render.short_message(summary, video.meta), reply_markup=_keyboard(video_id)
+        message,
+        render.short_message(summary, video.meta, video.transcript_source),
+        reply_markup=_keyboard(video_id),
     )
 
 
@@ -197,7 +199,7 @@ async def on_full(callback: CallbackQuery) -> None:
     await callback.answer()
     await callback.message.answer_document(
         BufferedInputFile(
-            render.full_markdown_bytes(stored.summary, stored.meta),
+            render.full_markdown_bytes(stored.summary, stored.meta, stored.source),
             filename=render.document_name(stored.meta),
         ),
         caption=f"Полная версия: {escape(stored.meta.title, quote=False)}"[:1024],
